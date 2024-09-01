@@ -51,6 +51,11 @@ bool chargingState = false;
 
 int screenStatus = 0; // 0 - main screeen/ 1 - settings screen
 
+int heatingTimeHour1 = 0, heatingTimeHour2 = 0, heatingTimeMinutes = 0; // Heating time
+int chargingTimeHour1 = 0, chargingTimeHour2 = 0, chargingTimeMinutes = 0; // Charging time
+int maxTemp = 36; // Temperature range
+bool isCelsius = true; // Temperature scale
+
 // Creating two DHT11 instances, one for each sensor
 DHT11 dht1(DHTPIN);
 DHT11 dht2(DHTPIN2);
@@ -156,7 +161,7 @@ void printMain(){ // prints main display
 }
 
 void printSettings() {
-  // tft.fillScreen(TFT_WHITE); // Fill the screen with white color
+  tft.fillScreen(TFT_WHITE); // Fill the screen with white color
   tft.fillRoundRect(5, 5, 470, 310, 25, TFT_BLACK); // Background
   
   tft.drawSmoothRoundRect(70, 225, 20, 19, 140, 75, TFT_WHITE); // First button
@@ -167,16 +172,47 @@ void printSettings() {
   tft.setCursor(132, 12); // Set cursor position for title
   tft.print("/// USER SETTINGS");
 
-  //Setting Options
-  tft.setTextSize(2); // Set the text size for the buttons
-  tft.setCursor(20, 45); // Set cursor position for settings
+  // Editable fields
+  tft.setTextSize(2); // Set the text size
+  tft.setCursor(20, 45); // Set cursor position for charging time
   tft.print("Charging Time: ");
-  tft.setCursor(20, 90); // Set cursor position for Start/Stop
+  tft.fillRect(200, 43, 180, 20, TFT_BLACK);
+  tft.setCursor(210, 45);
+  tft.print(chargingTimeHour1);
+  tft.print(":");
+  tft.print(chargingTimeMinutes);
+  tft.print(" - ");
+  tft.print(chargingTimeHour1);
+  tft.print(":");
+  tft.print(chargingTimeMinutes);
+
+  tft.setCursor(20, 90); // Set cursor position for heating time
   tft.print("Heating Time: ");
-  tft.setCursor(20, 135); // Set cursor position for settings
+  tft.fillRect(200, 88, 150, 20, TFT_BLACK);
+  tft.setCursor(210, 90);
+  tft.print(heatingTimeHour1);
+  tft.print(":");
+  tft.print(heatingTimeMinutes);
+  tft.print(" - ");
+  tft.print(heatingTimeHour2);
+  tft.print(":");
+  tft.print(heatingTimeMinutes);
+
+  tft.setCursor(20, 135); // Set cursor position for temperature range
   tft.print("Ambient Temperature: ");
-  tft.setCursor(20, 180); // Set cursor position for Start/Stop
+  tft.fillRect(270, 133, 100, 20, TFT_BLACK);
+  tft.setCursor(280, 135);
+  tft.print(maxTemp);
+  tft.print(" ");
+  tft.print(isCelsius ? "C" : "F");
+  tft.print((char)247); // Degree symbol
+
+  tft.setCursor(20, 180); // Set cursor position for temperature scale
   tft.print("Temperature Scale: ");
+  tft.fillRect(240, 178, 50, 20, TFT_BLACK);
+  tft.setCursor(250, 180);
+  tft.print(isCelsius ? "C" : "F");
+  tft.print((char)247); // Degree symbol
 
   tft.setTextSize(2); // Set the text size for the buttons
   tft.setCursor(118, 255); // Set cursor position for settings
@@ -255,8 +291,6 @@ void heater(void *pvParameter){ // responsible for heat scheduling
     vTaskDelay(500  / portTICK_PERIOD_MS);
 
   }
-
-
 }
 
 void touchInterface(void *pvParameter){
@@ -270,43 +304,46 @@ void touchInterface(void *pvParameter){
         Serial.print(y);
         Serial.println(")");
 
-      if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) { // wrapping screenStatus stuff in mutex
-      // Serial.println(screenStatus);
-        if(screenStatus ==0){
-          if (x <= 100 && x >= 0 && y <= 173 && y >= 0) {
-            // screenStatus = 1; // global variable set to settings screen
-            // printSettings(); // uses function to print the settings screen to the display
-            Serial.println("Settings Button");
+        if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) { // wrapping screenStatus stuff in mutex
+          if(screenStatus == 0 && x <= 100 && x >= 0 && y <= 173 && y >= 0){
+                screenStatus = 1; // global variable set to settings screen
+                printSettings(); // uses function to print the settings screen to the display
+                Serial.println("Settings Button");
+          } else if(screenStatus == 1 && y > 280 && y < 400 && x < 100){
+                screenStatus = 0;
+                printMain();
           }
-          if(x < 100 && x > 0 && y > 173 && y< 280){ // toggles charging state of battery
-            chargingState = !chargingState;
-            chargeFunction();
-            Serial.println("Start/Stop Charing");
-          }
-          if(x < 100 && x > 0 && y > 280 && y < 480){ // toggles heating
-            Serial.println("Start/Stop Heating");
-            heatingToggle = true; // toggle so heating loop only runs once
-            heatingRoom = !heatingRoom;
-            
-          }
-          if(x > 138 && x < 259 && y > 58 && y < 200) // toggle external temp measurement
-            celciusTemp = !celciusTemp;
-            changeRoomTemp(roomTemp);
-            Serial.println("change temperature");
+          // Serial.println(screenStatus);
+            if(screenStatus ==0){
+              if(x < 100 && x > 0 && y > 173 && y< 280){ // toggles charging state of battery
+                chargingState = !chargingState;
+                chargeFunction();
+                Serial.println("Start/Stop Charing");
+              }
+              if(x < 100 && x > 0 && y > 280 && y < 480){ // toggles heating
+                Serial.println("Start/Stop Heating");
+                heatingToggle = true; // toggle so heating loop only runs once
+                heatingRoom = !heatingRoom;
+                
+              }
+              if(x > 138 && x < 259 && y > 58 && y < 200) // toggle external temp measurement
+                celciusTemp = !celciusTemp;
+                changeRoomTemp(roomTemp);
+                Serial.println("change temperature");
+            }
+            if(screenStatus == 1){
+              if( y > 80 && y < 200 && x < 100){
+                Serial.println("Save Button");
+              }
+              if(x > 240 && x < 260 && y < 243 && y > 216){
+                Serial.println("start temp");
+              }
+            }
+          // Release the mutex after modifying screenStatus
+          xSemaphoreGive(xMutex);
         }
-        if(screenStatus == 1){
-          // if statements for the settings screens
-          if(x <= 100 && x >= 0 && y <= 173 && y >= 0) {
-            screenStatus = 0; // set screen status back to main display
-            Serial.println("Settings Button");
-            printMain(); // main screen GUI is then printed to the screen
-          }
-        }
-        // Release the mutex after modifying screenStatus
-        xSemaphoreGive(xMutex);
-      }
 
-      vTaskDelay(200 / portTICK_PERIOD_MS);
+      vTaskDelay(500 / portTICK_PERIOD_MS);
     }
   }
 }
