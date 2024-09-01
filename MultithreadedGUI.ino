@@ -219,13 +219,15 @@ void printSettings() {
 void turnOnHeat(){
   heatingRoom = true;
   digitalWrite(heatOn, HIGH);
-  delay(10000);
+  delay(15000);
   digitalWrite(heatOn, LOW);
 }
 
 void turnOffHeat(){
   heatingRoom = false;
   digitalWrite(heatOff, HIGH);
+  delay(15000);
+  delay(10000);
   delay(10000);
   digitalWrite(heatOff, LOW);
 }
