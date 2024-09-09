@@ -45,21 +45,25 @@ int roomTemp = 0;
 int roomTempF = (roomTemp * 1.8) + 32;
 int temp1 = 0;
 int temp2 = 0;
-bool celciusTemp = true;
+
+int internalTemp1 = 0;
+int internalTemp2 = 0;
+int avgInternalTemp = 0;
+// bool celciusTemp = true;
 
 bool heatingToggle = false;
 bool heatingRoom = false;
+bool showBattery = false; // Flag for battery
 
 bool chargingState = false;
 
 int screenStatus = 0;  // 0 - main screeen/ 1 - settings screen
 
-int finalHeatTime1 = 0;
-
 int finalStartHeating = 0;
 int finalEndHeating = 0;
 int finalStartCharging = 0;
 int finalEndCharging = 0;
+int finalTemp = 0;
 
 // all these variables are basically temporary
 int heatingTimeHour1 = 0, heatingTimeHour2 = 0, heatingTimeMinutes = 0;     // Heating time
@@ -109,7 +113,7 @@ void setup() {
 
   xTaskCreate(&touchInterface, "touchInterface", 1512, NULL, 1, NULL);
   xTaskCreate(&internalTemp, "internalTemp", 2000, NULL, 2, NULL);
-  xTaskCreate(&testThread, "testThread", 3000, NULL, 2, NULL);
+  // xTaskCreate(&testThread, "testThread", 3000, NULL, 2, NULL);
   xTaskCreate(&heater, "heater", 3000, NULL, 1, NULL);
 }
 
@@ -371,7 +375,25 @@ void decreaseValue() {
   }
 }
 
-void changeInternalTemp(int newTemp) {  // meant to update the internal sand battery temperature
+// void changeInternalTemp(int newTemp) {  // meant to update the internal sand battery temperature
+// }
+
+void changeInternalTemp(int newTemp) {  // meant to update the internal sand battery temperature  tft.setTextSize(4);
+  if (showBattery) {
+    // Display battery percentage
+    int batteryPercent = 100; // Example battery percentage
+    tft.setCursor(305, 105);
+    tft.print(batteryPercent);
+    tft.print("%");
+  } else {
+    // Display internal temperature
+    // int temp = dht.readTemperature();
+      tft.setCursor(305, 105);
+      tft.print(newTemp);
+      tft.print((char)247); // Degree symbol
+      tft.print("C");
+    
+  }
 }
 
 void changeRoomTemp(int newTemp) {  // updates the room temperature variable, also checks values
@@ -384,7 +406,7 @@ void changeRoomTemp(int newTemp) {  // updates the room temperature variable, al
     return;
   }
   // tft.print(newTemp);
-  if (celciusTemp) {
+  if (isCelsius) {
     tft.print(newTemp);
     tft.print((char)247);  // Degree symbol
     tft.print("C");
@@ -438,6 +460,7 @@ void printSettings() {
   heatingTimeHour2 = finalEndHeating;
   chargingTimeHour1 = finalStartCharging;
   chargingTimeHour2 = finalEndCharging;
+  minTemp = finalTemp;
 
   tft.fillScreen(TFT_WHITE); // Fill the screen with white color
   tft.fillRoundRect(5, 5, 470, 310, 25, TFT_BLACK); // Background
@@ -537,7 +560,7 @@ void internalTemp(void *pvParameter){
   // Read temperature from first thermocouple
   int status1 = thermoCouple1.read();
   float temp1 = thermoCouple1.getTemperature();
-
+  internalTemp1 = temp1;
 
   // Serial.print("Thermocouple 1 - Status: ");
   // Serial.print(status1);
@@ -548,12 +571,28 @@ void internalTemp(void *pvParameter){
 
   int status2 = thermoCouple2.read();
   float temp2 = thermoCouple2.getTemperature();
+  internalTemp2 = temp2;
+
+  int roomTemp1 = dht1.readTemperature();
+  int roomTemp2 = dht2.readTemperature();
+  roomTemp = (roomTemp1 + roomTemp2) / 2; // average room temperature
+
+  avgInternalTemp = (internalTemp1 + internalTemp2) / 2; // average internal temperature
+  // changeInternalTemp(avgInternalTemp);
+    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
+      if(screenStatus == 0){
+        changeInternalTemp(avgInternalTemp);
+        changeRoomTemp(roomTemp);
+      }
+      xSemaphoreGive(xMutex);
+
+      }
   // Serial.print("Thermocouple 2 - Status: ");
   // Serial.print(status2);
   // Serial.print(" Temperature: ");
   // Serial.println(temp2);
 
-  vTaskDelay(2000 / portTICK_PERIOD_MS);
+  vTaskDelay(500 / portTICK_PERIOD_MS);
   }
 }
 
@@ -598,20 +637,12 @@ void heater(void *pvParameter) {  // responsible for heat scheduling
     }
 }
 
-// int finalStartHeating = 0;
-// int finalEndHeating = 0;
-// int finalStartCharging = 0;
-// int finalEndCharging = 0;
-
-// // all these variables are basically temporary
-// int heatingTimeHour1 = 0, heatingTimeHour2 = 0, heatingTimeMinutes = 0;     // Heating time
-// int chargingTimeHour1 = 0, chargingTimeHour2 = 0, chargingTimeMinutes = 0;  // Charging time
-
 void settingSave(){
   finalStartHeating = heatingTimeHour1;
   finalEndHeating = heatingTimeHour2;
   finalStartCharging = chargingTimeHour1;
-  finalEndCharging = chargingTimeHour2; 
+  finalEndCharging = chargingTimeHour2;
+  finalTemp = minTemp;
 }
 
 void touchInterface(void *pvParameter) {
@@ -628,20 +659,24 @@ void touchInterface(void *pvParameter) {
 
       if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {  // wrapping screenStatus stuff in mutex
         if (screenStatus == 0) {
-          if (x < 100 && x > 0 && y > 173 && y < 280) {  // toggles charging state of battery
+          if (x < 100 && x > 0 && y > 173 && y < 320) {  // toggles charging state of battery
             chargingState = !chargingState;
             chargeFunction();
             Serial.println("Start/Stop Charging");
           }
-          if (x < 100 && x > 0 && y > 280 && y < 480) {  // toggles heating
+          if (x < 100 && x > 0 && y > 320 && y < 480) {  // toggles heating
             Serial.println("Start/Stop Heating");
             heatingToggle = true;  // toggle so heating loop only runs once
             heatingRoom = !heatingRoom;
           }
-          // if (x > 138 && x < 259 && y > 58 && y < 200)  // toggle external temp measurement
-          //   celciusTemp = !celciusTemp;
+          if(y < 440 && y > 280 && x < 277 && x > 110){
+            Serial.println("toggle internal temperature");
+            showBattery = !showBattery;
+          }
+          if (x > 138 && x < 259 && y > 58 && y < 200)  // toggle external temp measurement
+            // celciusTemp = !celciusTemp;
           // changeRoomTemp(roomTemp);
-          // Serial.println("change temperature");
+          Serial.println("change temperature");
         }
         if (screenStatus == 1) { // in the settings screen
           clearPreviousHighlight(); // Clear the previous highlight
@@ -697,38 +732,38 @@ void touchInterface(void *pvParameter) {
   }
 }
 
-void testThread(void *pvParameter) {  // reading external temperature
-                                      // esp_task_wdt_delete(NULL);
-  while (1) {
-    int temp1 = dht1.readTemperature();
-    int temp2 = dht2.readTemperature();
-    roomTemp = (temp1 + temp2) / 2;
-    // Serial.println(roomTemp);
-    // Serial.println(celciusTemp);
+// void testThread(void *pvParameter) {  // reading external temperature
+//                                       // esp_task_wdt_delete(NULL);
+//   while (1) {
+//     int temp1 = dht1.readTemperature();
+//     int temp2 = dht2.readTemperature();
+//     roomTemp = (temp1 + temp2) / 2;
+//     // Serial.println(roomTemp);
+//     // Serial.println(celciusTemp);
 
-    // Serial.print("DHT #1: ");
-    // Serial.println(temp1);
+//     // Serial.print("DHT #1: ");
+//     // Serial.println(temp1);
 
-    // Serial.print("DHT #2: ");
-    // Serial.println(temp2);
+//     // Serial.print("DHT #2: ");
+//     // Serial.println(temp2);
 
-    // Print stack usage for debugging
-    // UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
-    // Serial.print("DHT High Water Mark: ");
-    // Serial.println(uxHighWaterMark);
+//     // Print stack usage for debugging
+//     // UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
+//     // Serial.print("DHT High Water Mark: ");
+//     // Serial.println(uxHighWaterMark);
 
-    // Lock the mutex before accessing screenStatus
-    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
-      if (screenStatus == 0)
-        changeRoomTemp(roomTemp);  // update the value on the screen with the average value
-      // Release the mutex after reading screenStatus
-      xSemaphoreGive(xMutex);
-    }
+//     // Lock the mutex before accessing screenStatus
+//     if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
+//       if (screenStatus == 0)
+//         changeRoomTemp(roomTemp);  // update the value on the screen with the average value
+//       // Release the mutex after reading screenStatus
+//       xSemaphoreGive(xMutex);
+//     }
 
-   // Ensure the task yields or waits for a short period
-    vTaskDelay(1000 / portTICK_PERIOD_MS);  // Adjust the delay as needed
+//    // Ensure the task yields or waits for a short period
+//     vTaskDelay(1000 / portTICK_PERIOD_MS);  // Adjust the delay as needed
 
-    // Add a task watchdog reset or call taskYIELD()
-    // esp_task_wdt_feed();  // This replaces the previous WDT reset function
-  }
-}
+//     // Add a task watchdog reset or call taskYIELD()
+//     // esp_task_wdt_feed();  // This replaces the previous WDT reset function
+//   }
+// }
