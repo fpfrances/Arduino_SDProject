@@ -891,11 +891,15 @@ void checkFlags() {
                 bool schedulingFlag = doc["scheduleFlag"];
 
                 if (heatingToggleFlag) {
+                  if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
                     if (heatingRoom) {
                         turnOffHeat();  // Turn off heating if it is on
                     } else {
                         turnOnHeat();  // Turn on heating if it is off
                     }
+                    xSemaphoreGive(heatMutex);
+                  }
+
                 }
 
                 if (chargingToggleFlag) {
@@ -1009,6 +1013,7 @@ void internalTemp(void *pvParameter){
 
 void turnOnHeat() {
   heatingRoom = true;
+  Serial.println("heating on");
   digitalWrite(heatOff, LOW);
   digitalWrite(heatOn, HIGH);
   heatCircle();
@@ -1059,16 +1064,25 @@ void overheatingAlert() {
 
 
 void heater(void *pvParameter) {  // responsible for heat scheduling ==================== going to need to input webserver heating status updates if user manually changes heating status
-  turnOffHeat(); // make sure default state is to off
+  if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+      turnOffHeat(); // make sure default state is to off
+      xSemaphoreGive(heatMutex);
+  }
     while (1) {
         if (tm.tm_hour == finalStartHeating && tm.tm_min == heatingEndMinute && tm.tm_sec == 1) { // at 19:00:01 turn on the heating === can add another conditional statement that checks the 
           Serial.println("turning on heating");
-          turnOnHeat();
+          if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+            turnOnHeat();
+            xSemaphoreGive(heatMutex);
+          }
         }
 
         if(tm.tm_hour == finalEndHeating && tm.tm_min == heatingEndMinute && tm.tm_sec == 30){ // turn off at 19:00:30
           Serial.println("scheduling off for heating");
-          turnOffHeat();
+          if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+            turnOffHeat();
+            xSemaphoreGive(heatMutex);
+          }
         }
 
         if(tm.tm_hour == finalStartCharging && tm.tm_min == chargeStartMinute && tm.tm_sec == 0){ //  checks for starting charge time
