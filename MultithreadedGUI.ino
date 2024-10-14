@@ -47,6 +47,7 @@
 
 SemaphoreHandle_t xMutex;
 SemaphoreHandle_t chargeMutex;
+SemaphoreHandle_t heatMutex;
 
 // Setting global variables
 int roomTemp = 0;
@@ -152,8 +153,9 @@ void setup() {
 
   xMutex = xSemaphoreCreateMutex();
   chargeMutex = xSemaphoreCreateMutex();
+  heatMutex = xSemaphoreCreateMutex();
 
-  if (xMutex == NULL || chargeMutex == NULL) {
+  if (xMutex == NULL || chargeMutex == NULL || heatMutex == NULL) {
     Serial.println("Mutex creation failed");
     while (1);
   }
@@ -897,8 +899,11 @@ void checkFlags() {
                 }
 
                 if (chargingToggleFlag) {
+                  if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
                     chargingState = !chargingState;  // Toggle charging state
-                    chargeFunction();  // Call charge function
+                    chargeFunction();
+                    xSemaphoreGive(chargeMutex);
+                  }
                 }
 
                 if(schedulingFlag){
@@ -961,17 +966,32 @@ void internalTemp(void *pvParameter){
 
   int roomTemp1 = dht1.readTemperature();
   int roomTemp2 = dht2.readTemperature();
-  if(roomTemp1 > 100 && roomTemp2 < 100){ // basically if roomTemp1 is erroring out
-    roomTemp = roomTemp2;
-  }else if(roomTemp1 < 100 && roomTemp2 > 100){ // if roomTemp2 is erroring out
-    roomTemp = roomTemp1;
-  }else if(roomTemp1 > 100 && roomTemp2 > 100){
-    roomTemp = 69;
+  if(roomTemp1 > 100 || roomTemp2 > 100){
+    if(roomTemp1 > 100 && roomTemp2 < 100){ // basically if roomTemp1 is erroring out
+      roomTemp = roomTemp2;
+    }else if(roomTemp1 < 100 && roomTemp2 > 100){ // if roomTemp2 is erroring out
+      roomTemp = roomTemp1;
+    }else if(roomTemp1 > 100 && roomTemp2 > 100){
+      roomTemp = 69;
+    } 
   } else{
         roomTemp = (roomTemp1 + roomTemp2) / 2; // average room temperature
   }
 
-  avgInternalTemp = (internalTemp1 + internalTemp2) / 2; // average internal temperature
+
+  if(status1 < 10 || status2 < 10){
+    if(status1 < 10 && status2 > 10){ // if thermocouple 1 is failing
+    avgInternalTemp = status2;
+    } else if(status1 > 10 && status2 < 10){ // if thermocouple 2 is failing
+    avgInternalTemp = status1;
+    } else if(status1 < 10 && status2 < 10){ // if both are failing
+    avginternalTemp = 69;
+    }
+  } else{
+    avgInternalTemp = (internalTemp1 + internalTemp2) / 2; // average internal temperature
+    }
+
+
     if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
       if(screenStatus == 0){
         changeInternalTemp(avgInternalTemp);
@@ -1059,7 +1079,7 @@ void heater(void *pvParameter) {  // responsible for heat scheduling ===========
           }
         }
 
-        if(tm.tm_hour == finalEndCharging && tm.tm_min == chargeEndMinute && tm.tm_sec == 5){ // checks for end charging time to toggle false
+        if(tm.tm_hour == finalEndCharging && tm.tm_min == chargeEndMinute && tm.tm_sec == 2){ // checks for end charging time to toggle false
           if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
             chargingState = false;
             chargeFunction();
@@ -1108,10 +1128,13 @@ void touchInterface(void *pvParameter) {
           }
           if (x < 100 && x > 0 && y > 320 && y < 480) {  // toggles heating
             Serial.println("Start/Stop Heating");
-            if(heatingRoom){
+            if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+              if(heatingRoom){
               turnOffHeat();
             } else if(!heatingRoom){
               turnOnHeat();
+            }
+            xSemaphoreGive(heatMutex);
             }
           }
           if(y < 440 && y > 280 && x < 277 && x > 110){
