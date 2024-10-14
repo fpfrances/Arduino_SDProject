@@ -979,12 +979,12 @@ void internalTemp(void *pvParameter){
   }
 
 
-  if(status1 < 10 || status2 < 10){
-    if(status1 < 10 && status2 > 10){ // if thermocouple 1 is failing
-    avgInternalTemp = status2;
-    } else if(status1 > 10 && status2 < 10){ // if thermocouple 2 is failing
-    avgInternalTemp = status1;
-    } else if(status1 < 10 && status2 < 10){ // if both are failing
+  if(temp1 < 10 || temp2 < 10){
+    if(temp1 < 10 && temp2 > 10){ // if thermocouple 1 is failing
+    avgInternalTemp = temp2;
+    } else if(temp1 > 10 && temp2 < 10){ // if thermocouple 2 is failing
+    avgInternalTemp = temp1;
+    } else if(temp1 < 10 && temp2 < 10){ // if both are failing
     avgInternalTemp = 69;
     }
   } else{
