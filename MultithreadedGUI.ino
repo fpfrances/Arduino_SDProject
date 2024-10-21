@@ -48,6 +48,7 @@
 SemaphoreHandle_t xMutex;
 SemaphoreHandle_t chargeMutex;
 SemaphoreHandle_t heatMutex;
+SemaphoreHandle_t roomTempMutex;
 
 // Setting global variables
 int roomTemp = 0;
@@ -154,8 +155,9 @@ void setup() {
   xMutex = xSemaphoreCreateMutex();
   chargeMutex = xSemaphoreCreateMutex();
   heatMutex = xSemaphoreCreateMutex();
+  roomTempMutex = xSemaphoreCreateMutex();
 
-  if (xMutex == NULL || chargeMutex == NULL || heatMutex == NULL) {
+  if (xMutex == NULL || chargeMutex == NULL || heatMutex == NULL || roomTempMutex) {
     Serial.println("Mutex creation failed");
     while (1);
   }
@@ -724,7 +726,10 @@ void sendBatteryUpdate() {
 
         // Add the data to the JSON document
         doc["batteryID"] = batteryID;
-        doc["currentRoomTemp"] = roomTemp;
+        if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+          doc["currentRoomTemp"] = roomTemp;
+          xSemaphoreGive(roomTempMutex);
+        }
         doc["currentInternalTemp"] = avgInternalTemp;
         doc["setRoomTemp"] = finalTemp;
         doc["heatingRoom"] = heatingRoom;
@@ -946,7 +951,7 @@ void sendDataTask(void *parameter) { // this functionn is going to handle everyt
         Serial.println("internal temperature is: ");
         Serial.print(avgInternalTemp);
         Serial.println("room temp: ");
-        Serial.print(roomTemp);
+        // Serial.print(roomTemp);
         vTaskDelay(15000 / portTICK_PERIOD_MS);
       }else{ // no longer connected to the internet
         // function responsible for connecting ESP32 to internet 
@@ -970,16 +975,23 @@ void internalTemp(void *pvParameter){
 
   int roomTemp1 = dht1.readTemperature();
   int roomTemp2 = dht2.readTemperature();
-  if(roomTemp1 > 100 || roomTemp2 > 100){
-    if(roomTemp1 > 100 && roomTemp2 < 100){ // basically if roomTemp1 is erroring out
+  if(roomTemp1 > 100 || roomTemp2 > 100){ // updating room temperature value
+    if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+      if(roomTemp1 > 100 && roomTemp2 < 100){ // basically if roomTemp1 is erroring out
       roomTemp = roomTemp2;
-    }else if(roomTemp1 < 100 && roomTemp2 > 100){ // if roomTemp2 is erroring out
-      roomTemp = roomTemp1;
-    }else if(roomTemp1 > 100 && roomTemp2 > 100){
-      roomTemp = 69;
-    } 
+      }else if(roomTemp1 < 100 && roomTemp2 > 100){ // if roomTemp2 is erroring out
+        roomTemp = roomTemp1;
+      }else if(roomTemp1 > 100 && roomTemp2 > 100){
+        roomTemp = 69;
+      } 
+      xSemaphoreGive(roomTempMutex);
+    }
+
   } else{
+      if(xSemaphoreTake(roomTempMutex,portMAX_DELAY) == pdTRUE){
         roomTemp = (roomTemp1 + roomTemp2) / 2; // average room temperature
+        xSemaphoreGive(roomTempMutex);
+      }
   }
 
 
@@ -999,7 +1011,10 @@ void internalTemp(void *pvParameter){
     if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
       if(screenStatus == 0){
         changeInternalTemp(avgInternalTemp);
-        changeRoomTemp(roomTemp);
+        if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){ // get mutex for the roomTemp global variable
+          changeRoomTemp(roomTemp);
+          xSemaphoreGive(roomTempMutex);
+        }
       }
       xSemaphoreGive(xMutex);
 
@@ -1206,7 +1221,10 @@ void touchInterface(void *pvParameter) {
           screenStatus = 0;
           printMain();
           changeInternalTemp(avgInternalTemp);
-          changeRoomTemp(roomTemp);
+          if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+            changeRoomTemp(roomTemp);
+            xSemaphoreGive(roomTempMutex);
+          }
       }
         // Release the mutex after modifying screenStatus
         xSemaphoreGive(xMutex);
