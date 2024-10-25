@@ -580,8 +580,6 @@ void printSettings() {
     tft.drawRect(190, 40, 95, 33, TFT_YELLOW); // Highlight charging time
     }  else if (selectedField == CHARGING_TIME2){
         tft.drawRect(320, 40, 95, 33, TFT_YELLOW); // Highlight charging time
-    }   else {
-        clearPreviousHighlight(); // Clear the previous highlight
     }
 
   // Editable fields
@@ -605,9 +603,7 @@ void printSettings() {
     tft.drawRect(190, 85, 95, 33, TFT_YELLOW); // Highlight heating time
   } else if (selectedField == HEATING_TIME2){
         tft.drawRect(320, 85, 95, 33, TFT_YELLOW); // Highlight charging time
-  }   else {
-        clearPreviousHighlight(); // Clear the previous highlight
-    }
+  }
 
   tft.setTextSize(2); // Set the text size
   tft.setCursor(20, 95); // Set cursor position for heating time
@@ -627,9 +623,7 @@ void printSettings() {
   // Highlight temperature range if selected
   if (selectedField == TEMPERATURE_RANGE) {
     tft.drawRect(270, 130, 90, 33, TFT_YELLOW); // Highlight temperature range
-  }   else {
-        clearPreviousHighlight(); // Clear the previous highlight
-    }
+  }
 
   tft.setTextSize(2); // Set the text size
   tft.setCursor(20, 140); // Set cursor position for temperature range
@@ -643,9 +637,7 @@ void printSettings() {
   // Highlight temperature scale if selected
   if (selectedField == TEMPERATURE_SCALE) {
     tft.drawRect(245, 172, 42, 33, TFT_YELLOW); // Highlight temperature scale
-  }   else {
-        clearPreviousHighlight(); // Clear the previous highlight
-    }
+  }
 
   tft.setTextSize(2); // Set the text size
   tft.setCursor(20, 185); // Set cursor position for temperature scale
@@ -1319,6 +1311,7 @@ void touchInterface(void *pvParameter) {
         if (screenStatus == 0 && x <= 100 && x >= 0 && y <= 173 && y >= 0) { // press settigns button
           screenStatus = 1;  // global variable set to settings screen
           printSettings();   // uses function to print the settings screen to the display
+          clearPreviousHighlight(); // Clear the previous highlight
           Serial.println("Settings Button");
       } else if (screenStatus == 1 && y > 320 && y < 480 && x < 100) { // back button
            screenStatus = 0;
