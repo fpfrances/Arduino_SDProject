@@ -129,7 +129,7 @@ bool localScheduleFlag = false; // would ideally need a mutex lock but only two 
 void setup() {
   Serial.begin(115200);  // Initialize serial communication at 115200 baud
 
-    #ifdef ARDUINO_ARCH_ESP32
+  #ifdef ARDUINO_ARCH_ESP32
   // ESP32 seems to be a little more complex:
   configTime(0, 0, MY_NTP_SERVER);  // 0, 0 because we will use TZ in the next line
   setenv("TZ", MY_TZ, 1);            // Set environment variable with your time zone
@@ -580,6 +580,8 @@ void printSettings() {
     tft.drawRect(190, 40, 95, 33, TFT_YELLOW); // Highlight charging time
     }  else if (selectedField == CHARGING_TIME2){
         tft.drawRect(320, 40, 95, 33, TFT_YELLOW); // Highlight charging time
+    }   else {
+        clearPreviousHighlight(); // Clear the previous highlight
     }
 
   // Editable fields
@@ -603,6 +605,8 @@ void printSettings() {
     tft.drawRect(190, 85, 95, 33, TFT_YELLOW); // Highlight heating time
   } else if (selectedField == HEATING_TIME2){
         tft.drawRect(320, 85, 95, 33, TFT_YELLOW); // Highlight charging time
+  }   else {
+        clearPreviousHighlight(); // Clear the previous highlight
     }
 
   tft.setTextSize(2); // Set the text size
@@ -623,7 +627,9 @@ void printSettings() {
   // Highlight temperature range if selected
   if (selectedField == TEMPERATURE_RANGE) {
     tft.drawRect(270, 130, 90, 33, TFT_YELLOW); // Highlight temperature range
-  }
+  }   else {
+        clearPreviousHighlight(); // Clear the previous highlight
+    }
 
   tft.setTextSize(2); // Set the text size
   tft.setCursor(20, 140); // Set cursor position for temperature range
@@ -637,7 +643,9 @@ void printSettings() {
   // Highlight temperature scale if selected
   if (selectedField == TEMPERATURE_SCALE) {
     tft.drawRect(245, 172, 42, 33, TFT_YELLOW); // Highlight temperature scale
-  }
+  }   else {
+        clearPreviousHighlight(); // Clear the previous highlight
+    }
 
   tft.setTextSize(2); // Set the text size
   tft.setCursor(20, 185); // Set cursor position for temperature scale
