@@ -10,7 +10,10 @@
 #include <Preferences.h>
 #include <HTTPClient.h>
 #include <time.h>
-#include <ArduinoJson.h>
+#include <ArduinoJson.h> 
+
+
+
 
 // Pin definitions for DHT11
 #define DHTPIN 5    // Pin connected to the first DHT11 data pin
@@ -129,7 +132,7 @@ bool localScheduleFlag = false; // would ideally need a mutex lock but only two 
 void setup() {
   Serial.begin(115200);  // Initialize serial communication at 115200 baud
 
-  #ifdef ARDUINO_ARCH_ESP32
+    #ifdef ARDUINO_ARCH_ESP32
   // ESP32 seems to be a little more complex:
   configTime(0, 0, MY_NTP_SERVER);  // 0, 0 because we will use TZ in the next line
   setenv("TZ", MY_TZ, 1);            // Set environment variable with your time zone
@@ -171,12 +174,609 @@ void setup() {
   xTaskCreatePinnedToCore(wifiTask,"WiFiTask",4096,NULL,1,&wifiTaskHandle,1); 
   xTaskCreatePinnedToCore(sendDataTask,"SendData",16384,NULL,2,&dataSendTaskHandle,1); // task to connect to webserver and monitor WiFi
   xTaskCreate(&touchInterface, "touchInterface", 4096, NULL, 1, NULL);
-  xTaskCreate(&internalTemp, "internalTemp", 2000, NULL, 3, NULL);
+  xTaskCreate(&internalTemp, "internalTemp", 2000, NULL, 2, NULL);
   xTaskCreate(&heater, "heater", 3000, NULL, 1, NULL);
   xTaskCreate(&showTime,"showTime",2048, NULL, 1, NULL);
+  // xTaskCreate(monitorStack, "StackMonitor", 2048, NULL, 1, NULL);
+
 }
 
-void loop() {}
+void loop() {} // ===============================================================================================================================
+
+void sendDataTask(void *parameter) {
+    int counter = 0;
+    while (true) {
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("Connected to the internet!");
+            checkFlags();  // Now async
+            sendBatteryUpdate();  // Now async
+            Serial.print("internal temperature is: ");
+            // if (xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE) {
+            //     Serial.println(avgInternalTemp);
+            //     xSemaphoreGive(internalTempMutex);
+            // }
+            // Serial.print("room temp: ");
+            // if (xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE) {
+            //     Serial.println(roomTemp);
+            //     xSemaphoreGive(roomTempMutex);
+            // }
+            vTaskDelay(15000 / portTICK_PERIOD_MS);
+        } else {
+            connectToWiFiTask();  // Handle Wi-Fi connection
+        }
+    }
+}
+
+void wifiTask(void *parameter) {
+    while (true) {
+        dnsServer.processNextRequest();  // Handle DNS requests for captive portal
+        vTaskDelay(10 / portTICK_PERIOD_MS);  // Send data every 30 seconds
+    }
+}
+
+void heater(void *pvParameter) {  // responsible for heat scheduling ==================== going to need to input webserver heating status updates if user manually changes heating status
+  if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+      turnOffHeat(); // make sure default state is to off
+      xSemaphoreGive(heatMutex);
+  }
+  int tempInternalTemperature = 0;
+    while (1) {
+      if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){ // creating local internal temp vairable to avoid nested mutex locks
+        tempInternalTemperature = avgInternalTemp;
+        xSemaphoreGive(internalTempMutex);
+      }
+
+      if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+        if (tm.tm_hour == finalStartHeating && tm.tm_min == heatingEndMinute && tm.tm_sec == 1 && roomTemp < finalTemp) { // at 19:00:01 turn on the heating
+          Serial.println("turning on heating");
+          if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+            turnOnHeat();
+            xSemaphoreGive(heatMutex);
+          }
+        }
+        xSemaphoreGive(roomTempMutex);
+      }
+        if(tm.tm_hour == finalEndHeating && tm.tm_min == heatingEndMinute && tm.tm_sec == 30){ // turn off at 19:00:30
+          Serial.println("scheduling off for heating");
+          if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+            turnOffHeat();
+            xSemaphoreGive(heatMutex);
+          }
+        }
+      // if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
+        if(tm.tm_hour == finalStartCharging && tm.tm_min == chargeStartMinute && tm.tm_sec == 0 && tempInternalTemperature < 500){ //  checks for starting charge time
+          if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
+            chargingState = true;
+            chargeFunction();
+          xSemaphoreGive(chargeMutex);
+          }
+        }
+      //   xSemaphoreGive(internalTempMutex);
+      // }
+
+        if(tm.tm_hour == finalEndCharging && tm.tm_min == chargeEndMinute && tm.tm_sec == 2){ // checks for end charging time to toggle false
+          if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
+            chargingState = false;
+            chargeFunction();
+            xSemaphoreGive(chargeMutex);
+          }
+        }
+      vTaskDelay(750 / portTICK_PERIOD_MS);
+    }
+}
+
+void internalTemp(void *pvParameter){
+  int localScreenStatus = 0;
+  while(1){
+  // Read temperature from first thermocouple
+  int status1 = thermoCouple1.read();
+  float temp1 = thermoCouple1.getTemperature();
+  internalTemp1 = temp1;
+
+  // Read temperature from second thermocouple
+  int status2 = thermoCouple2.read();
+  float temp2 = thermoCouple2.getTemperature();
+  internalTemp2 = temp2;
+
+  int roomTemp1 = dht1.readTemperature();
+  int roomTemp2 = dht2.readTemperature();
+  if(roomTemp1 > 100 || roomTemp2 > 100){ // updating room temperature value
+    if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+      if(roomTemp1 > 100 && roomTemp2 < 100){ // basically if roomTemp1 is erroring out
+      roomTemp = roomTemp2;
+      }else if(roomTemp1 < 100 && roomTemp2 > 100){ // if roomTemp2 is erroring out
+        roomTemp = roomTemp1;
+      }else if(roomTemp1 > 100 && roomTemp2 > 100){
+        roomTemp = 69;
+      } 
+      xSemaphoreGive(roomTempMutex);
+    }
+  } else{
+      if(xSemaphoreTake(roomTempMutex,portMAX_DELAY) == pdTRUE){
+        roomTemp = (roomTemp1 + roomTemp2) / 2; // average room temperature
+        xSemaphoreGive(roomTempMutex);
+      }
+  }
+
+  if(temp1 < 10 || temp2 < 10){ // technically I would've been fine wrapping the whole thing in one mutex, but if anything to reduce time of mutex lock being held its probably best to just have the mutex lock for each individual if block
+    if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
+      if(temp1 < 10 && temp2 > 10){ // if thermocouple 1 is failing
+      avgInternalTemp = temp2;
+      } else if(temp1 > 10 && temp2 < 10){ // if thermocouple 2 is failing
+      avgInternalTemp = temp1;
+      } else if(temp1 < 10 && temp2 < 10){ // if both are failing
+      avgInternalTemp = 69;
+      }
+      xSemaphoreGive(internalTempMutex);
+    }
+  } else{ // this else is if both thermocouples are having correct readings
+      if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
+        avgInternalTemp = (internalTemp1 + internalTemp2) / 2; // average internal temperature
+        xSemaphoreGive(internalTempMutex);
+      }
+    }
+    if(xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE){
+      localScreenStatus = screenStatus;
+      xSemaphoreGive(xMutex);
+    }
+
+    // if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
+      if(localScreenStatus == 0){
+        if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
+          changeInternalTemp(avgInternalTemp);
+          xSemaphoreGive(internalTempMutex);
+        }
+        if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){ // get mutex for the roomTemp global variable
+          changeRoomTemp(roomTemp);
+          xSemaphoreGive(roomTempMutex);
+        }
+      }
+      // xSemaphoreGive(xMutex);
+
+      // } else{
+      //   Serial.println("Temp failed to get mutex lock");
+      // }
+  vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+void touchInterface(void *pvParameter) {
+  int localScreenStatus = 0;
+
+  while (1) {
+    if (ft6336u.read_td_status()) {  // if touched
+      int x = ft6336u.read_touch1_x();
+      int y = ft6336u.read_touch1_y();
+      Serial.print("FT6336U Touch Position 1: (");
+      Serial.print(x);
+      Serial.print(" , ");
+      Serial.print(y);
+      Serial.println(")");
+      // if(xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE){
+      //   xSemaphoreGive(xMutex);
+      // }
+
+      if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {  // wrapping screenStatus stuff in mutex
+        if (screenStatus == 0) {
+          if (x < 100 && x > 0 && y > 173 && y < 320) {  // toggles charging state of battery
+            if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
+            chargingState = !chargingState; // toggles charging state and calls charge function
+            chargeFunction();
+            xSemaphoreGive(chargeMutex);
+            }
+            Serial.println("Start/Stop Charging");
+          }
+          if (x < 100 && x > 0 && y > 320 && y < 480) {  // toggles heating
+            Serial.println("Start/Stop Heating");
+            if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+              if(heatingRoom){
+              turnOffHeat();
+            } else if(!heatingRoom){
+              turnOnHeat();
+            }
+            xSemaphoreGive(heatMutex);
+            }
+          }
+          if(y < 440 && y > 280 && x < 277 && x > 110){
+            Serial.println("toggle internal temperature");
+            tft.fillCircle(350, 120, 72, TFT_BLACK);  // Clear the circle area
+            showBattery = !showBattery;
+            if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
+              changeInternalTemp(avgInternalTemp);
+              xSemaphoreGive(internalTempMutex);
+            }
+          }
+
+          if (x > 138 && x < 259 && y > 58 && y < 200)  // toggle external temp measurement
+            // celciusTemp = !celciusTemp;
+          // changeRoomTemp(roomTemp);
+          Serial.println("change temperature");
+        }
+        if (screenStatus == 1) { // in the settings screen
+          clearPreviousHighlight(); // Clear the previous highlight
+
+          // Check if the user clicked on one of the editable fields or buttons
+          if (x >= 230 && x <= 255 && y >= 195 && y <= 265) { // Charging Time
+            selectedField = CHARGING_TIME1;
+            highlightSelectedArea(); // Highlight without changing values
+          } else if (x >= 240 && x <= 285 && y >= 325 && y <= 385) { // Charging Time
+            selectedField = CHARGING_TIME2;
+            highlightSelectedArea(); // Highlight without changing values
+          } else if (x >= 195 && x <= 210 && y >= 195 && y <= 260) { // Heating Time
+            selectedField = HEATING_TIME1;
+            highlightSelectedArea(); // Highlight without changing values
+          } else if (x >= 195 && x <= 215 && y >= 330 && y <= 395) { // Charging Time
+            selectedField = HEATING_TIME2;
+            highlightSelectedArea(); // Highlight without changing values
+          } else if (x >= 155 && x <= 165 && y >= 280 && y <= 355) { // Temperature Range
+            selectedField = TEMPERATURE_RANGE;
+            highlightSelectedArea(); // Highlight without changing values
+          } else if (x >= 115 && x <= 125 && y >= 255 && y <= 285) { // Temperature Scale Celcius to Farenheight
+            selectedField = TEMPERATURE_SCALE;
+            highlightSelectedArea(); // Highlight without changing values
+          } else if (x >= 15 && x <= 90 && y >= 32 && y <= 155) { // Save Button
+            settingSave(); // saving magic here
+            Serial.println("Settings saved");
+          } else if (x >= 15 && x <= 90 && y >= 180 && y <= 225) { // Up Button
+            increaseValue();
+            Serial.println("Up");
+          } else if (x >= 15 && x <= 90 && y >= 255 && y <= 310) { // Down Button
+            decreaseValue();
+            Serial.println("Down");
+          } else if (x >= 15 && x <= 90 && y >= 335 && y <= 450) { // Back Button
+            Serial.println("Back to previous screen");
+          }
+        }
+        if (screenStatus == 0 && x <= 100 && x >= 0 && y <= 173 && y >= 0) { // press settigns button
+          screenStatus = 1;  // global variable set to settings screen
+          printSettings();   // uses function to print the settings screen to the display
+          Serial.println("Settings Button");
+      } else if (screenStatus == 1 && y > 320 && y < 480 && x < 100) { // back button
+           screenStatus = 0;
+          printMain();
+          if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
+            changeInternalTemp(avgInternalTemp);
+            xSemaphoreGive(internalTempMutex);
+          }
+          if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+            changeRoomTemp(roomTemp);
+            xSemaphoreGive(roomTempMutex);
+          }
+      }
+        // Release the mutex after modifying screenStatus
+        xSemaphoreGive(xMutex);
+      }
+      vTaskDelay(200 / portTICK_PERIOD_MS);
+    } else{
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+
+    }
+  }
+}
+
+void getSchedule(){ // gets app uploaded schedule from the database
+  if(WiFi.status() == WL_CONNECTED){
+    HTTPClient http;
+    String serverPath = "https://sandbattery.info/TDESGetSchedule?batteryID="+batteryID;
+    http.begin(serverPath);
+    int httpCode = http.GET();
+
+    if(httpCode > 0){
+      String payload = http.getString();  // Get the response body
+      Serial.println("Payload received: " + payload);
+
+      if (httpCode == 404) {
+        Serial.println("Battery not found (404)");
+        return;  // Stop here if the battery wasn't found
+      }
+
+      StaticJsonDocument<512> doc;
+      DeserializationError error = deserializeJson(doc, payload);
+
+      if (error) {
+        Serial.print(F("deserializeJson() failed: "));
+        Serial.println(error.f_str());
+        return;
+      }
+
+      if (doc.containsKey("exists") && doc["exists"] == true) {
+        int heatStartHour = doc["heatStartHour"];
+        int heatEndHour = doc["heatEndHour"];
+        int startheatingMinute = doc["startheatingMinute"];
+        int stopHeatingMinute = doc["stopHeatingMinute"];
+
+        int startChargingHour = doc["startChargingHour"]; // 1
+        int endChargingHour = doc["endChargingHour"];
+        int startChargingMinute = doc["startChargingMinute"];
+        int endChargingMinute = doc["endChargingMinute"];
+
+        // Serial.println(startChargingHour+""+endChargingHour+""+startChargingMinute+""+endChargingMinute);
+
+        finalStartHeating = heatStartHour;
+        finalEndHeating = heatEndHour;
+        finalStartCharging = startChargingHour;
+        finalEndCharging = endChargingHour;
+        heatingStartMinute = startheatingMinute;
+        heatingEndMinute = stopHeatingMinute;
+        chargeStartMinute = startChargingMinute;
+        chargeEndMinute = endChargingMinute;
+      }
+
+
+    }
+  }
+}
+
+void checkFlags() {
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        String serverPath = "https://sandbattery.info/TDESToggleCheck?batteryID="+batteryID;
+        // Serial.println("URL: " + serverPath);
+
+        http.begin(serverPath);
+
+        int httpCode = http.GET();  // No need to add headers for GET requests
+
+        if (httpCode > 0) {
+            String payload = http.getString();  // Get the response body
+            Serial.println("Payload received: " + payload);
+
+            if (httpCode == 404) {
+                Serial.println("Battery not found (404)");
+                return;  // Stop here if the battery wasn't found
+            }
+
+            StaticJsonDocument<512> doc;
+            DeserializationError error = deserializeJson(doc, payload);
+
+            if (error) {
+                Serial.print(F("deserializeJson() failed: "));
+                Serial.println(error.f_str());
+                return;
+            }
+
+            // Check for the 'exists' field first
+            if (doc.containsKey("exists") && doc["exists"] == true) {
+                bool heatingToggleFlag = doc["heatingToggleFlag"];
+                bool chargingToggleFlag = doc["chargingToggleFlag"];
+                bool schedulingFlag = doc["scheduleFlag"];
+
+                if (heatingToggleFlag) {
+                  if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
+                    if (heatingRoom) {
+                        turnOffHeat();  // Turn off heating if it is on
+                    } else {
+                        turnOnHeat();  // Turn on heating if it is off
+                    }
+                    xSemaphoreGive(heatMutex);
+                  }
+
+                }
+
+                if (chargingToggleFlag) {
+                  if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
+                    chargingState = !chargingState;  // Toggle charging state
+                    chargeFunction();
+                    xSemaphoreGive(chargeMutex);
+                  }
+                }
+
+                if(schedulingFlag){
+                  // Serial.println("new schedule detected, getting and updating local schedule");
+                  localScheduleFlag = false; // lowers local save flag just in case
+                  getSchedule(); // if scheduling flag was raised then get new schedule from cloud
+                }
+
+            } else {
+                Serial.println("Battery does not exist or flags not present");
+            }
+
+        } else {
+            Serial.print("Error sending GET request: ");
+            Serial.println(httpCode);  // Print HTTP error code
+        }
+
+        http.end();  // End HTTP connection
+
+    } else {
+        Serial.println("Wi-Fi not connected. Unable to send data.");
+    }
+}
+
+void startAccessPoint() {
+    WiFi.softAP(apSSID, apPassword);
+    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+    Serial.println("Access Point started");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.softAPIP());
+
+    // Start DNS server to redirect all requests to the AP IP address
+    dnsServer.start(DNS_PORT, "*", apIP);
+
+    // Setup web server routes for captive portal detection and configuration page
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", generateHTML());
+    });
+
+    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", generateHTML());  // For Android captive portal
+    });
+
+    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", generateHTML());  // For iOS captive portal
+    });
+
+    server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request) {
+        String ssid = request->getParam("ssid", true)->value();
+        String password = request->getParam("password", true)->value();
+        saveCredentials(ssid, password);
+        request->send(200, "text/html", "Credentials saved. Attempting to connect to Wi-Fi...");
+        delay(2000);  // Short delay before restarting
+        ESP.restart();
+    });
+    server.begin();
+    Serial.println("Web server started");
+}
+
+void connectToWiFiTask() {
+    
+    preferences.begin("wifi-creds", false); // gets log in information
+    String ssid = preferences.getString("ssid", "");
+    String password = preferences.getString("password", "");
+    preferences.end();
+
+    WiFi.mode(WIFI_STA); // mode to connect to WiFi
+    WiFi.begin(ssid.c_str(), password.c_str()); // runs to connect to the Wifi
+
+    Serial.print("Connecting to Wi-Fi");
+    int attemptCount = 0;
+    while (WiFi.status() != WL_CONNECTED) { // this is the time out code for when its trying to connect
+        delay(1000);
+        Serial.print(".");
+        if (++attemptCount > 10) {
+            Serial.println("Failed to connect. Starting AP mode.");
+            clearCredentials(); // if disconnects for too long will just clear the credentials
+            startAccessPoint(); // Fall back to AP mode if connection fails
+            // xTaskCreate(startAccessPointTask, "startAccessPointTask", 8192, NULL, 1, NULL); // Start the AP mode if connection fails
+
+            vTaskDelete(NULL);  // Delete this task
+        }
+    }
+
+    Serial.println();
+    Serial.println("Connected to Wi-Fi!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+}
+
+void sendBatteryUpdate() {
+  int localRoomTemp = 0;
+  int localAvgInternalTemp = 0;
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        String serverPath = "https://sandbattery.info/batteryUpdate";
+
+        // Create the JSON document with a size of 512 (adjust this size based on your actual usage)
+        StaticJsonDocument<512> doc;
+
+        if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+          localRoomTemp = roomTemp;
+          xSemaphoreGive(roomTempMutex);
+        }
+
+        if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
+          localAvgInternalTemp = avgInternalTemp;
+          xSemaphoreGive(internalTempMutex);
+        }
+
+        // Add the data to the JSON document
+        doc["batteryID"] = batteryID;
+        // if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
+          doc["currentRoomTemp"] = localRoomTemp;
+        //   xSemaphoreGive(roomTempMutex);
+        // }
+
+        // if (xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE) {
+            doc["currentInternalTemp"] = localAvgInternalTemp;
+        //     xSemaphoreGive(internalTempMutex);
+        // }
+        doc["setRoomTemp"] = finalTemp;
+        doc["heatingRoom"] = heatingRoom;
+        doc["ChargingBoolean"] = chargingState;
+
+        // Only add the schedule if the localScheduleFlag is true
+        if (localScheduleFlag) {
+            localScheduleFlag = false;  // reset the flag after sending
+            Serial.println("inside the localSchedule flag if");
+            doc["finalStartHeating"] = finalStartHeating;
+            doc["finalEndHeating"] = finalEndHeating;
+            doc["finalStartCharging"] = finalStartCharging;
+            doc["finalEndCharging"] = finalEndCharging;
+            doc["startHeatingMin"] = startHeatingMin;
+            doc["endHeatingMin"] = endHeatingMin;
+            doc["startChargingMin"] = startChargingMin;
+            doc["endChargingMin"] = endChargingMin;
+
+        }
+
+        // Serialize the JSON document to a string
+        String jsonPayload;
+        serializeJson(doc, jsonPayload);
+
+        // Initialize the HTTP connection
+        http.begin(serverPath);
+        http.addHeader("Content-Type", "application/json");
+
+        // Send the POST request with the JSON payload
+        int httpResponseCode = http.POST(jsonPayload);
+
+        // Handle the HTTP response
+        if (httpResponseCode > 0) {
+            String response = http.getString();
+            Serial.println(httpResponseCode);
+            Serial.println(response);
+        } else {
+            Serial.print("Error on sending POST: ");
+            Serial.println(httpResponseCode);
+        }
+
+        // Close the connection
+        http.end();
+    } else {
+        Serial.println("Wi-Fi not connected. Unable to send data.");
+    }
+}
+
+void turnOnHeat() {
+  heatingRoom = true;
+  Serial.println("heating on");
+  digitalWrite(heatOff, LOW);
+  digitalWrite(heatOn, HIGH);
+  heatCircle();
+
+}
+
+void turnOffHeat() {
+  heatingRoom = false;
+  digitalWrite(heatOn, LOW);
+  digitalWrite(heatOff, HIGH);
+  heatCircleClear();
+}
+
+void chargeFunction() {  // function checks charging state and toggles according to whats needed
+    if (chargingState) { // if charging state set to true
+      digitalWrite(powerPin, HIGH);
+      chargeCircle();
+    } else {
+      digitalWrite(powerPin, LOW);
+      chargeCircleClear();
+    }
+}
+
+// Function to show that charging is ON
+void chargeCircle() {
+  tft.fillCircle(390, 18, 7, TFT_YELLOW); // Yellow circle
+}
+
+void chargeCircleClear(){
+    tft.fillCircle(390, 18, 7, TFT_BLACK);
+
+}
+
+// Function to show that heating is ON
+void heatCircle() {
+  tft.fillCircle(410, 18, 7, TFT_GREEN); // Green circle
+}
+
+void heatCircleClear(){
+    tft.fillCircle(410, 18, 7, TFT_BLACK);
+
+}
+
+// Function to alert that it is overheating
+void overheatingAlert() {
+  tft.fillCircle(430, 18, 7, TFT_RED); // Red circle
+}
 
 void editTemperatureRange() {
   if (minTemp < maxTemp)
@@ -203,16 +803,16 @@ void toggleTemperatureScale() {
 void highlightSelectedArea() {
     switch (selectedField) {
         case CHARGING_TIME1:
-            tft.drawRect(190, 40, 95, 33, TFT_YELLOW);
+            tft.drawRect(190, 40, 93, 33, TFT_YELLOW);
             break;
         case CHARGING_TIME2:
-            tft.drawRect(320, 40, 95, 33, TFT_YELLOW);
+            tft.drawRect(320, 40, 92, 33, TFT_YELLOW);
             break;
         case HEATING_TIME1:
-            tft.drawRect(190, 85, 95, 33, TFT_YELLOW);
+            tft.drawRect(190, 85, 93, 33, TFT_YELLOW);
             break;
         case HEATING_TIME2:
-            tft.drawRect(320, 85, 95, 33, TFT_YELLOW);
+            tft.drawRect(320, 85, 92, 33, TFT_YELLOW);
             break;
         case TEMPERATURE_RANGE:
             tft.drawRect(270, 130, 90, 33, TFT_YELLOW);
@@ -228,16 +828,16 @@ void highlightSelectedArea() {
 void clearPreviousHighlight() {
   switch (selectedField) {
     case CHARGING_TIME1:
-      tft.drawRect(190, 40, 95, 33, TFT_BLACK); // Clear charging time 1 highlight
+      tft.drawRect(190, 40, 93, 33, TFT_BLACK); // Clear charging time 1 highlight
       break;
     case CHARGING_TIME2:
-      tft.drawRect(320, 40, 95, 33, TFT_BLACK); // Clear charging time 2 highlight
+      tft.drawRect(320, 40, 92, 33, TFT_BLACK); // Clear charging time 2 highlight
       break;
     case HEATING_TIME1:
-      tft.drawRect(190, 85, 95, 33, TFT_BLACK); // Clear heating time 1 highlight
+      tft.drawRect(190, 85, 93, 33, TFT_BLACK); // Clear heating time 1 highlight
       break;
     case HEATING_TIME2:
-      tft.drawRect(320, 85, 95, 33, TFT_BLACK); // Clear heating time 2 highlight
+      tft.drawRect(320, 85, 92, 33, TFT_BLACK); // Clear heating time 2 highlight
       break;
     case TEMPERATURE_RANGE:
       tft.drawRect(270, 130, 90, 33, TFT_BLACK); // Clear temperature range highlight
@@ -249,6 +849,7 @@ void clearPreviousHighlight() {
       break;
   }
 }
+
 
 void updateSelectedArea() {
     switch (selectedField) {
@@ -532,6 +1133,7 @@ void printMain() {                         // prints main display
   //Title project name
   tft.setTextSize(2); // Set the text size
   tft.setCursor(52, 12); // Set cursor position for title
+  // tft.print("/// THERMAL DUNE ENERGY STORAGE");
 
   tft.setTextSize(2); // Set the text size for the buttons
   tft.setCursor(43, 255); // Set cursor position for settings
@@ -591,8 +1193,8 @@ void printSettings() {
   tft.print(chargingTimeHour1);
   tft.print(":");
   tft.print(chargeStartMinute);
-  tft.setCursor(295, 45);
-  tft.print("- ");
+  tft.setCursor(280, 45);
+  tft.print(" - ");
   tft.setCursor(325, 45);
   tft.print(chargingTimeHour2);
   tft.print(":");
@@ -603,7 +1205,7 @@ void printSettings() {
     tft.drawRect(190, 85, 95, 33, TFT_YELLOW); // Highlight heating time
   } else if (selectedField == HEATING_TIME2){
         tft.drawRect(320, 85, 95, 33, TFT_YELLOW); // Highlight charging time
-  }
+    }
 
   tft.setTextSize(2); // Set the text size
   tft.setCursor(20, 95); // Set cursor position for heating time
@@ -613,8 +1215,8 @@ void printSettings() {
   tft.print(heatingTimeHour1);
   tft.print(":");
   tft.print(heatingStartMinute);
-  tft.setCursor(295, 90);
-  tft.print("- ");
+  tft.setCursor(280, 90);
+  tft.print(" - ");
   tft.setCursor(325, 90);
   tft.print(heatingTimeHour2);
   tft.print(":");
@@ -684,139 +1286,6 @@ void showTime(void *parameter){
   }
 }
 
-
-void startAccessPoint() {
-    WiFi.softAP(apSSID, apPassword);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    Serial.println("Access Point started");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.softAPIP());
-
-    // Start DNS server to redirect all requests to the AP IP address
-    dnsServer.start(DNS_PORT, "*", apIP);
-
-    // Setup web server routes for captive portal detection and configuration page
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "text/html", generateHTML());
-    });
-
-    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "text/html", generateHTML());  // For Android captive portal
-    });
-
-    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "text/html", generateHTML());  // For iOS captive portal
-    });
-
-    server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request) {
-        String ssid = request->getParam("ssid", true)->value();
-        String password = request->getParam("password", true)->value();
-        saveCredentials(ssid, password);
-        request->send(200, "text/html", "Credentials saved. Attempting to connect to Wi-Fi...");
-        delay(2000);  // Short delay before restarting
-        ESP.restart();
-    });
-    server.begin();
-    Serial.println("Web server started");
-}
-
-void connectToWiFiTask() {
-    
-    preferences.begin("wifi-creds", false); // gets log in information
-    String ssid = preferences.getString("ssid", "");
-    String password = preferences.getString("password", "");
-    preferences.end();
-
-    WiFi.mode(WIFI_STA); // mode to connect to WiFi
-    WiFi.begin(ssid.c_str(), password.c_str()); // runs to connect to the Wifi
-
-    Serial.print("Connecting to Wi-Fi");
-    int attemptCount = 0;
-    while (WiFi.status() != WL_CONNECTED) { // this is the time out code for when its trying to connect
-        delay(1000);
-        Serial.print(".");
-        if (++attemptCount > 10) {
-            Serial.println("Failed to connect. Starting AP mode.");
-            clearCredentials(); // if disconnects for too long will just clear the credentials
-            startAccessPoint(); // Fall back to AP mode if connection fails
-            // xTaskCreate(startAccessPointTask, "startAccessPointTask", 8192, NULL, 1, NULL); // Start the AP mode if connection fails
-
-            vTaskDelete(NULL);  // Delete this task
-        }
-    }
-
-    Serial.println();
-    Serial.println("Connected to Wi-Fi!");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-}
-
-void sendBatteryUpdate() {
-    if (WiFi.status() == WL_CONNECTED) {
-        HTTPClient http;
-        String serverPath = "https://sandbattery.info/batteryUpdate";
-
-        // Create the JSON document with a size of 512 (adjust this size based on your actual usage)
-        StaticJsonDocument<512> doc;
-
-        // Add the data to the JSON document
-        doc["batteryID"] = batteryID;
-        if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
-          doc["currentRoomTemp"] = roomTemp;
-          xSemaphoreGive(roomTempMutex);
-        }
-
-        if (xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE) {
-            doc["currentInternalTemp"] = avgInternalTemp;
-            xSemaphoreGive(internalTempMutex);
-        }
-        doc["setRoomTemp"] = finalTemp;
-        doc["heatingRoom"] = heatingRoom;
-        doc["ChargingBoolean"] = chargingState;
-
-        // Only add the schedule if the localScheduleFlag is true
-        if (localScheduleFlag) {
-            localScheduleFlag = false;  // reset the flag after sending
-            Serial.println("inside the localSchedule flag if");
-            doc["finalStartHeating"] = finalStartHeating;
-            doc["finalEndHeating"] = finalEndHeating;
-            doc["finalStartCharging"] = finalStartCharging;
-            doc["finalEndCharging"] = finalEndCharging;
-            doc["startHeatingMin"] = startHeatingMin;
-            doc["endHeatingMin"] = endHeatingMin;
-            doc["startChargingMin"] = startChargingMin;
-            doc["endChargingMin"] = endChargingMin;
-
-        }
-
-        // Serialize the JSON document to a string
-        String jsonPayload;
-        serializeJson(doc, jsonPayload);
-
-        // Initialize the HTTP connection
-        http.begin(serverPath);
-        http.addHeader("Content-Type", "application/json");
-
-        // Send the POST request with the JSON payload
-        int httpResponseCode = http.POST(jsonPayload);
-
-        // Handle the HTTP response
-        if (httpResponseCode > 0) {
-            String response = http.getString();
-            Serial.println(httpResponseCode);
-            Serial.println(response);
-        } else {
-            Serial.print("Error on sending POST: ");
-            Serial.println(httpResponseCode);
-        }
-
-        // Close the connection
-        http.end();
-    } else {
-        Serial.println("Wi-Fi not connected. Unable to send data.");
-    }
-}
-
 String generateHTML() {
     String html = "<!DOCTYPE html><html><head><title>WiFi Setup</title></head><body>";
     html += "<h1>ESP32 Wi-Fi Setup</h1>";
@@ -844,349 +1313,6 @@ void clearCredentials() {
     preferences.end();
     Serial.println("Wi-Fi credentials cleared from preferences.");
 }
-
-void wifiTask(void *parameter) {
-    while (true) {
-        dnsServer.processNextRequest();  // Handle DNS requests for captive portal
-        vTaskDelay(10 / portTICK_PERIOD_MS);  // Send data every 30 seconds
-    }
-}
-
-void getSchedule(){ // gets app uploaded schedule from the database
-  if(WiFi.status() == WL_CONNECTED){
-    HTTPClient http;
-    String serverPath = "https://sandbattery.info/TDESGetSchedule?batteryID="+batteryID;
-    http.begin(serverPath);
-    int httpCode = http.GET();
-
-    if(httpCode > 0){
-      String payload = http.getString();  // Get the response body
-      Serial.println("Payload received: " + payload);
-
-      if (httpCode == 404) {
-        Serial.println("Battery not found (404)");
-        return;  // Stop here if the battery wasn't found
-      }
-
-      StaticJsonDocument<512> doc;
-      DeserializationError error = deserializeJson(doc, payload);
-
-      if (error) {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.f_str());
-        return;
-      }
-
-      if (doc.containsKey("exists") && doc["exists"] == true) {
-        int heatStartHour = doc["heatStartHour"];
-        int heatEndHour = doc["heatEndHour"];
-        int startheatingMinute = doc["startheatingMinute"];
-        int stopHeatingMinute = doc["stopHeatingMinute"];
-
-        int startChargingHour = doc["startChargingHour"];
-        int endChargingHour = doc["endChargingHour"];
-        int startChargingMinute = doc["startChargingMinute"];
-        int endChargingMinute = doc["endChargingMinute"];
-
-        // Serial.println(startChargingHour+""+endChargingHour+""+startChargingMinute+""+endChargingMinute);
-
-        finalStartHeating = heatStartHour;
-        finalEndHeating = heatEndHour;
-        finalStartCharging = startChargingHour;
-        finalEndCharging = endChargingHour;
-        heatingStartMinute = startheatingMinute;
-        heatingEndMinute = stopHeatingMinute;
-        chargeStartMinute = startChargingMinute;
-        chargeEndMinute = endChargingMinute;
-      }
-
-
-    }
-  }
-}
-
-void checkFlags() {
-    if (WiFi.status() == WL_CONNECTED) {
-        HTTPClient http;
-        String serverPath = "https://sandbattery.info/TDESToggleCheck?batteryID="+batteryID;
-        // Serial.println("URL: " + serverPath);
-
-        http.begin(serverPath);
-
-        int httpCode = http.GET();  // No need to add headers for GET requests
-
-        if (httpCode > 0) {
-            String payload = http.getString();  // Get the response body
-            Serial.println("Payload received: " + payload);
-
-            if (httpCode == 404) {
-                Serial.println("Battery not found (404)");
-                return;  // Stop here if the battery wasn't found
-            }
-
-            StaticJsonDocument<512> doc;
-            DeserializationError error = deserializeJson(doc, payload);
-
-            if (error) {
-                Serial.print(F("deserializeJson() failed: "));
-                Serial.println(error.f_str());
-                return;
-            }
-
-            // Check for the 'exists' field first
-            if (doc.containsKey("exists") && doc["exists"] == true) {
-                bool heatingToggleFlag = doc["heatingToggleFlag"];
-                bool chargingToggleFlag = doc["chargingToggleFlag"];
-                bool schedulingFlag = doc["scheduleFlag"];
-
-                if (heatingToggleFlag) {
-                  if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
-                    if (heatingRoom) {
-                        turnOffHeat();  // Turn off heating if it is on
-                    } else {
-                        turnOnHeat();  // Turn on heating if it is off
-                    }
-                    xSemaphoreGive(heatMutex);
-                  }
-
-                }
-
-                if (chargingToggleFlag) {
-                  if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
-                    chargingState = !chargingState;  // Toggle charging state
-                    chargeFunction();
-                    xSemaphoreGive(chargeMutex);
-                  }
-                }
-
-                if(schedulingFlag){
-                  // Serial.println("new schedule detected, getting and updating local schedule");
-                  localScheduleFlag = false; // lowers local save flag just in case
-                  getSchedule(); // if scheduling flag was raised then get new schedule from cloud
-                }
-
-            } else {
-                Serial.println("Battery does not exist or flags not present");
-            }
-
-        } else {
-            Serial.print("Error sending GET request: ");
-            Serial.println(httpCode);  // Print HTTP error code
-        }
-
-        http.end();  // End HTTP connection
-
-    } else {
-        Serial.println("Wi-Fi not connected. Unable to send data.");
-    }
-}
-
-
-
-
-void sendDataTask(void *parameter) {
-    int counter = 0;
-    while (true) {
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("Connected to the internet!");
-            checkFlags();  // Now async
-            sendBatteryUpdate();  // Now async
-            Serial.print("internal temperature is: ");
-            if (xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE) {
-                Serial.println(avgInternalTemp);
-                xSemaphoreGive(internalTempMutex);
-            }
-            Serial.print("room temp: ");
-            if (xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE) {
-                Serial.println(roomTemp);
-                xSemaphoreGive(roomTempMutex);
-            }
-            vTaskDelay(15000 / portTICK_PERIOD_MS);
-        } else {
-            connectToWiFiTask();  // Handle Wi-Fi connection
-        }
-    }
-}
-
-
-void internalTemp(void *pvParameter){
-  while(1){
-  // Read temperature from first thermocouple
-  int status1 = thermoCouple1.read();
-  float temp1 = thermoCouple1.getTemperature();
-  internalTemp1 = temp1;
-
-  // Read temperature from second thermocouple
-  int status2 = thermoCouple2.read();
-  float temp2 = thermoCouple2.getTemperature();
-  internalTemp2 = temp2;
-
-  int roomTemp1 = dht1.readTemperature();
-  int roomTemp2 = dht2.readTemperature();
-  if(roomTemp1 > 100 || roomTemp2 > 100){ // updating room temperature value
-    if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
-      if(roomTemp1 > 100 && roomTemp2 < 100){ // basically if roomTemp1 is erroring out
-      roomTemp = roomTemp2;
-      }else if(roomTemp1 < 100 && roomTemp2 > 100){ // if roomTemp2 is erroring out
-        roomTemp = roomTemp1;
-      }else if(roomTemp1 > 100 && roomTemp2 > 100){
-        roomTemp = 69;
-      } 
-      xSemaphoreGive(roomTempMutex);
-    }
-
-  } else{
-      if(xSemaphoreTake(roomTempMutex,portMAX_DELAY) == pdTRUE){
-        roomTemp = (roomTemp1 + roomTemp2) / 2; // average room temperature
-        xSemaphoreGive(roomTempMutex);
-      }
-  }
-
-
-
-  if(temp1 < 10 || temp2 < 10){ // technically I would've been fine wrapping the whole thing in one mutex, but if anything to reduce time of mutex lock being held its probably best to just have the mutex lock for each individual if block
-    if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
-      if(temp1 < 10 && temp2 > 10){ // if thermocouple 1 is failing
-      avgInternalTemp = temp2;
-      } else if(temp1 > 10 && temp2 < 10){ // if thermocouple 2 is failing
-      avgInternalTemp = temp1;
-      } else if(temp1 < 10 && temp2 < 10){ // if both are failing
-      avgInternalTemp = 69;
-      }
-      xSemaphoreGive(internalTempMutex);
-    }
-  } else{ // this else is if both thermocouples are having correct readings
-      if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
-        avgInternalTemp = (internalTemp1 + internalTemp2) / 2; // average internal temperature
-        xSemaphoreGive(internalTempMutex);
-      }
-    }
-
-
-    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
-      if(screenStatus == 0){
-        if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
-          changeInternalTemp(avgInternalTemp);
-          xSemaphoreGive(internalTempMutex);
-        }
-        if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){ // get mutex for the roomTemp global variable
-          changeRoomTemp(roomTemp);
-          xSemaphoreGive(roomTempMutex);
-        }
-      }
-      xSemaphoreGive(xMutex);
-
-      } else{
-        Serial.println("Temp failed to get mutex lock");
-      }
-  vTaskDelay(500 / portTICK_PERIOD_MS);
-  }
-}
-
-void turnOnHeat() {
-  heatingRoom = true;
-  Serial.println("heating on");
-  digitalWrite(heatOff, LOW);
-  digitalWrite(heatOn, HIGH);
-  heatCircle();
-
-}
-
-void turnOffHeat() {
-  heatingRoom = false;
-  digitalWrite(heatOn, LOW);
-  digitalWrite(heatOff, HIGH);
-  heatCircleClear();
-}
-
-void chargeFunction() {  // function checks charging state and toggles according to whats needed
-    if (chargingState) { // if charging state set to true
-      digitalWrite(powerPin, HIGH);
-      chargeCircle();
-    } else {
-      digitalWrite(powerPin, LOW);
-      chargeCircleClear();
-    }
-}
-
-// Function to show that charging is ON
-void chargeCircle() {
-  tft.fillCircle(390, 18, 7, TFT_YELLOW); // Yellow circle
-}
-
-void chargeCircleClear(){
-    tft.fillCircle(390, 18, 7, TFT_BLACK);
-
-}
-
-// Function to show that heating is ON
-void heatCircle() {
-  tft.fillCircle(410, 18, 7, TFT_GREEN); // Green circle
-}
-
-void heatCircleClear(){
-    tft.fillCircle(410, 18, 7, TFT_BLACK);
-
-}
-
-// Function to alert that it is overheating
-void overheatingAlert() {
-  tft.fillCircle(430, 18, 7, TFT_RED); // Red circle
-}
-
-
-void heater(void *pvParameter) {  // responsible for heat scheduling ===========
-  if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
-      turnOffHeat(); // make sure default state is to off
-      xSemaphoreGive(heatMutex);
-  }
-  int tempInternal = 0;
-
-    while (1) {
-      if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
-        tempInternal = avgInternalTemp;
-        xSemaphoreGive(internalTempMutex);
-      }
-      // Serial.print("TempInternal variable says: ");
-      // Serial.println(tempInternal);
-      if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
-        if (tm.tm_hour == finalStartHeating && tm.tm_min == heatingStartMinute && tm.tm_sec == 1 && roomTemp < finalTemp) { // at 19:00:01 turn on the heating
-          Serial.println("turning on heating");
-          if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
-            turnOnHeat();
-            xSemaphoreGive(heatMutex);
-          }
-        }
-        xSemaphoreGive(roomTempMutex);
-      }
-        if(tm.tm_hour == finalEndHeating && tm.tm_min == heatingEndMinute && tm.tm_sec == 30){ // turn off at 19:00:30
-          Serial.println("scheduling off for heating");
-          if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
-            turnOffHeat();
-            xSemaphoreGive(heatMutex);
-          }
-        }
-
-        if(tm.tm_hour == finalStartCharging && tm.tm_min == chargeStartMinute && tm.tm_sec == 0 && tempInternal < 500){ //  checks for starting charge time
-          if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
-            chargingState = true;
-            chargeFunction();
-          xSemaphoreGive(chargeMutex);
-          }
-        }
-
-
-        if(tm.tm_hour == finalEndCharging && tm.tm_min == chargeEndMinute && tm.tm_sec == 2){ // checks for end charging time to toggle false
-          if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
-            chargingState = false;
-            chargeFunction();
-            xSemaphoreGive(chargeMutex);
-          }
-        }
-      vTaskDelay(750 / portTICK_PERIOD_MS);
-    }
-}
-
 
 void settingSave(){
   finalStartHeating = heatingTimeHour1;
@@ -1216,120 +1342,4 @@ void settingSave(){
   Serial.print(heatingEndMinute);
   Serial.println(" ");
   // Serial.println("local schedule flag set to true");
-}
-
-void touchInterface(void *pvParameter) {
-  int tempInternalTouch = 0;
-
-  while (1) {
-    if (ft6336u.read_td_status()) {  // if touched
-      int x = ft6336u.read_touch1_x();
-      int y = ft6336u.read_touch1_y();
-      Serial.print("FT6336U Touch Position 1: (");
-      Serial.print(x);
-      Serial.print(" , ");
-      Serial.print(y);
-      Serial.println(")");
-
-
-      if(xSemaphoreTake(internalTempMutex, portMAX_DELAY) == pdTRUE){
-        tempInternalTouch = avgInternalTemp;
-        xSemaphoreGive(internalTempMutex);
-      }
-
-      // Serial.print("Touch temp internal: ");
-      // Serial.println(tempInternalTouch);
-      if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {  // wrapping screenStatus stuff in mutex
-        if (screenStatus == 0) {
-          if (x < 100 && x > 0 && y > 173 && y < 320) {  // toggles charging state of battery
-            if(xSemaphoreTake(chargeMutex, portMAX_DELAY) == pdTRUE){
-            chargingState = !chargingState; // toggles charging state and calls charge function
-            chargeFunction();
-            xSemaphoreGive(chargeMutex);
-            }
-            Serial.println("Start/Stop Charging");
-          }
-          if (x < 100 && x > 0 && y > 320 && y < 480) {  // toggles heating
-            Serial.println("Start/Stop Heating");
-            if(xSemaphoreTake(heatMutex, portMAX_DELAY) == pdTRUE){
-              if(heatingRoom){
-              turnOffHeat();
-            } else if(!heatingRoom){
-              turnOnHeat();
-            }
-            xSemaphoreGive(heatMutex);
-            }
-          }
-          if(y < 440 && y > 280 && x < 277 && x > 110){
-            Serial.println("toggle internal temperature");
-            tft.fillCircle(350, 120, 72, TFT_BLACK);  // Clear the circle area
-            showBattery = !showBattery;
-            changeInternalTemp(tempInternalTouch);
-
-          }
-
-          if (x > 138 && x < 259 && y > 58 && y < 200)  // toggle external temp measurement
-            // celciusTemp = !celciusTemp;
-          // changeRoomTemp(roomTemp);
-          Serial.println("change temperature");
-        }
-        if (screenStatus == 1) { // in the settings screen
-          clearPreviousHighlight(); // Clear the previous highlight
-
-          // Check if the user clicked on one of the editable fields or buttons
-          if (x >= 230 && x <= 255 && y >= 195 && y <= 265) { // Charging Time
-            selectedField = CHARGING_TIME1;
-            highlightSelectedArea(); // Highlight without changing values
-          } else if (x >= 240 && x <= 285 && y >= 325 && y <= 385) { // Charging Time
-            selectedField = CHARGING_TIME2;
-            highlightSelectedArea(); // Highlight without changing values
-          } else if (x >= 195 && x <= 210 && y >= 195 && y <= 260) { // Heating Time
-            selectedField = HEATING_TIME1;
-            highlightSelectedArea(); // Highlight without changing values
-          } else if (x >= 195 && x <= 215 && y >= 330 && y <= 395) { // Charging Time
-            selectedField = HEATING_TIME2;
-            highlightSelectedArea(); // Highlight without changing values
-          } else if (x >= 155 && x <= 165 && y >= 280 && y <= 355) { // Temperature Range
-            selectedField = TEMPERATURE_RANGE;
-            highlightSelectedArea(); // Highlight without changing values
-          } else if (x >= 115 && x <= 125 && y >= 255 && y <= 285) { // Temperature Scale Celcius to Farenheight
-            selectedField = TEMPERATURE_SCALE;
-            highlightSelectedArea(); // Highlight without changing values
-          } else if (x >= 15 && x <= 90 && y >= 32 && y <= 155) { // Save Button
-            settingSave(); // saving magic here
-            Serial.println("Settings saved");
-          } else if (x >= 15 && x <= 90 && y >= 180 && y <= 225) { // Up Button
-            increaseValue();
-            Serial.println("Up");
-          } else if (x >= 15 && x <= 90 && y >= 255 && y <= 310) { // Down Button
-            decreaseValue();
-            Serial.println("Down");
-          } else if (x >= 15 && x <= 90 && y >= 335 && y <= 450) { // Back Button
-            Serial.println("Back to previous screen");
-          }
-        }
-        if (screenStatus == 0 && x <= 100 && x >= 0 && y <= 173 && y >= 0) { // press settigns button
-          screenStatus = 1;  // global variable set to settings screen
-          printSettings();   // uses function to print the settings screen to the display
-          clearPreviousHighlight(); // Clear the previous highlight
-          Serial.println("Settings Button");
-      } else if (screenStatus == 1 && y > 320 && y < 480 && x < 100) { // back button
-           screenStatus = 0;
-          printMain();
-          changeInternalTemp(tempInternalTouch);
-
-          if(xSemaphoreTake(roomTempMutex, portMAX_DELAY) == pdTRUE){
-            changeRoomTemp(roomTemp);
-            xSemaphoreGive(roomTempMutex);
-          }
-      }
-        // Release the mutex after modifying screenStatus
-        xSemaphoreGive(xMutex);
-      }
-      vTaskDelay(200 / portTICK_PERIOD_MS);
-    } else{
-            vTaskDelay(50 / portTICK_PERIOD_MS);
-
-    }
-  }
 }
