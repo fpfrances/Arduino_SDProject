@@ -491,6 +491,7 @@ void getSchedule(){ // gets app uploaded schedule from the database
         int endChargingMinute = doc["endChargingMinute"];
 
         // Serial.println(startChargingHour+""+endChargingHour+""+startChargingMinute+""+endChargingMinute);
+        Serial.println(heatStartHour+" "+heatEndHour+" "+startheatingMinute+" "+stopHeatingMinute); // test function for the heating schedule which isn't working
 
         finalStartHeating = heatStartHour;
         finalEndHeating = heatEndHour;
