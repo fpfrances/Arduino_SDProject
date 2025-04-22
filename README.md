@@ -50,3 +50,13 @@ Make sure the following libraries are installed in your Arduino IDE:
 - [`TFT_eSPI`](https://github.com/Bodmer/TFT_eSPI)
 - Wire (built-in for I2C)
 - Custom FT6336U touch driver (or I2C-based implementation)
+
+## 🖼️ Screenshots
+
+### Home Screen
+![Home UI Sketch](images/mainscreen_sketch.png)
+
+### Settings Screen
+![Settings UI Sketch](images/settingscreen_sketch.png)
+
+
