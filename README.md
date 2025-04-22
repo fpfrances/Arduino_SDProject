@@ -53,10 +53,10 @@ Make sure the following libraries are installed in your Arduino IDE:
 
 ## 🖼️ Screenshots
 
-### Home Screen
+### Home Screen Sketch
 ![Home UI Sketch](images/mainscreen_sketch.png)
 
-### Settings Screen
+### Settings Screen Sketch
 ![Settings UI Sketch](images/settingscreen_sketch.png)
 
 
