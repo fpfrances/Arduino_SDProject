@@ -59,4 +59,7 @@ Make sure the following libraries are installed in your Arduino IDE:
 ### Settings Screen Sketch
 ![Settings UI Sketch](images/settingscreen_sketch.png)
 
+## 🎥 Demo
 
+Check out the full project running here:  
+👉 [Watch the video on YouTube](https://youtu.be/9csl4HlAC3I)
